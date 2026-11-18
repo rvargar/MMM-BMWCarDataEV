@@ -32,10 +32,10 @@ const bmwApiRoutes = {
   readVehicleData: {type: 'GET', url: 'https://api-cardata.bmwgroup.com/customers/vehicles', headers: {Accept: 'application/json', 'x-version': 'v1'}, addToken: true},
 };
 
-const containerName = 'MM_data';
+const containerPrefix = 'MM_data'; // prefix of our container name in BMW's CarData API
 // Scopes requested at login. The module only uses the REST API; the streaming scope is optional and
 // makes BMW reject the login (400 invalid_request) if "CarData Stream" is not enabled for the client ID.
-const defaultScope = 'authenticate_user openid cardata:api:read'; // name for our container in BMW's CarData API
+const defaultScope = 'authenticate_user openid cardata:api:read';
 
 // Descriptors requested in the container. Availability varies per model; missing ones come back as null.
 const technicalDescriptors = [
@@ -58,10 +58,57 @@ const technicalDescriptors = [
   "vehicle.drivetrain.electricEngine.charging.timeRemaining",
   "vehicle.body.chargingPort.status",
   "vehicle.trip.segment.end.drivetrain.batteryManagement.hvSoc",
+  // energy / battery
+  "vehicle.drivetrain.avgElectricRangeConsumption",
+  "vehicle.drivetrain.batteryManagement.maxEnergy",
+  "vehicle.powertrain.electric.battery.stateOfHealth.displayed",
+  "vehicle.powertrain.electric.battery.preconditioning.state",
+  "vehicle.drivetrain.electricEngine.remainingElectricRange",
+  // charging details
+  "vehicle.powertrain.electric.battery.charging.power",
+  "vehicle.drivetrain.electricEngine.charging.timeToFullyCharged",
+  "vehicle.drivetrain.electricEngine.charging.method",
+  "vehicle.drivetrain.electricEngine.charging.chargingMode",
+  "vehicle.drivetrain.electricEngine.charging.acVoltage",
+  "vehicle.drivetrain.electricEngine.charging.acAmpere",
+  "vehicle.body.chargingPort.dcStatus",
+  "vehicle.powertrain.electric.battery.charging.dcChargingModeActive",
+  // last trip
+  "vehicle.trip.segment.end.time",
+  "vehicle.trip.segment.end.travelledDistance",
+  "vehicle.trip.segment.accumulated.drivetrain.electricEngine.recuperationTotal",
+  "vehicle.trip.segment.accumulated.drivetrain.electricEngine.energyConsumptionComfort",
+  "vehicle.trip.segment.accumulated.drivetrain.transmission.setting.fractionDriveEcoPro",
+  "vehicle.trip.segment.accumulated.acceleration.starsAverage",
+  "vehicle.trip.segment.accumulated.chassis.brake.starsAverage",
+  // tyres
+  "vehicle.chassis.axle.row1.wheel.left.tire.pressure",
+  "vehicle.chassis.axle.row1.wheel.right.tire.pressure",
+  "vehicle.chassis.axle.row2.wheel.left.tire.pressure",
+  "vehicle.chassis.axle.row2.wheel.right.tire.pressure",
+  "vehicle.chassis.axle.row1.wheel.left.tire.pressureTarget",
+  "vehicle.chassis.axle.row1.wheel.right.tire.pressureTarget",
+  "vehicle.chassis.axle.row2.wheel.left.tire.pressureTarget",
+  "vehicle.chassis.axle.row2.wheel.right.tire.pressureTarget",
+  "vehicle.chassis.axle.row1.wheel.left.tire.temperature",
+  "vehicle.chassis.axle.row1.wheel.right.tire.temperature",
+  "vehicle.chassis.axle.row2.wheel.left.tire.temperature",
+  "vehicle.chassis.axle.row2.wheel.right.tire.temperature",
 ];
 
+// BMW containers cannot be modified: the name carries a short hash of the descriptor list,
+// so a changed list automatically creates a new container (and the old one is deleted).
+const containerName = containerPrefix + '_' + crypto.createHash('sha1').update(technicalDescriptors.join(',')).digest('hex').slice(0, 8);
+const WHEELS = {frontLeft: 'row1.wheel.left', frontRight: 'row1.wheel.right', rearLeft: 'row2.wheel.left', rearRight: 'row2.wheel.right'};
+
+
 var sessionInfoFile = null;
+var cacheFile = null;
 var containerAttached = {};
+
+function saveCache(self) {
+  fs.writeFile(cacheFile, JSON.stringify(self.cache), err => { if (err) { log(0, err); } });
+}
 
 function saveSession(self) {
   fs.writeFile(sessionInfoFile, JSON.stringify(self.sessionInfo), err => { if (err) { log(0, err); } });
@@ -75,6 +122,14 @@ module.exports = NodeHelper.create({
     this.bmwInfo = {};
 
     sessionInfoFile = path.join(this.path, 'bmw_session_info.json');
+    cacheFile = path.join(this.path, 'bmw_cache.json');
+    this.cache = {};
+    try {
+      if (fs.existsSync(cacheFile))
+        this.cache = JSON.parse(fs.readFileSync(cacheFile, 'utf8')) || {};
+    } catch (e) {
+      this.cache = {};
+    }
     log(1, `attempting to load session info from file ${sessionInfoFile}`);
     try {
       if (fs.existsSync(sessionInfoFile)) {
@@ -158,6 +213,13 @@ module.exports = NodeHelper.create({
     info.chargingStatus = chargingStatus || null;
     info.chargingTimeRemaining = num(t, "vehicle.drivetrain.electricEngine.charging.timeRemaining");
 
+    try {
+      info.ext = await buildExtended(this, vin, t, info);
+    } catch (e) {
+      log(0, 'could not build extended data: ' + (e && e.stack ? e.stack : e));
+      info.ext = null;
+    }
+
     const imageFile = path.join(this.path, 'car-' + vin + '.png');
     info.imageUrl = fs.existsSync(imageFile) ? 'modules/MMM-BMWCarData/car-' + vin + '.png' : null;
     info.updateTime = Date.now();
@@ -167,6 +229,176 @@ module.exports = NodeHelper.create({
     this.sendSocketNotification("MMM-BMWCARDATA-RESPONSE" + payload.instanceId, info);
   },
 });
+
+function entry(t, key) {
+  return (t && t[key]) ? t[key] : {};
+}
+
+function tsMs(v) {
+  // BMW uses ISO strings, epoch seconds or epoch milliseconds depending on the endpoint
+  if (v === null || v === undefined || v === '') return null;
+  if (typeof v === 'number' || /^\d+$/.test(String(v))) {
+    const n = Number(v);
+    return n < 1e12 ? n * 1000 : n;
+  }
+  const d = Date.parse(String(v).replace(' UTC', 'Z'));
+  return isNaN(d) ? null : d;
+}
+
+function round(v, digits) {
+  if (v === null || v === undefined || isNaN(v)) return null;
+  const f = Math.pow(10, digits || 0);
+  return Math.round(v * f) / f;
+}
+
+function minutesSince(ms) {
+  return ms ? (Date.now() - ms) / 60000 : Infinity;
+}
+
+// Calls a dedicated endpoint at most every `intervalMin` minutes; result is cached on disk to survive restarts.
+async function cachedEndpoint(self, vin, key, intervalMin, endpoint) {
+  self.cache[vin] = self.cache[vin] || {};
+  const c = self.cache[vin][key];
+  if (c && minutesSince(c.fetchedAt) < intervalMin)
+    return c.data;
+  const res = await bmwApiCall(self, vin, bmwApiRoutes.readVehicleData, '/' + vin + endpoint);
+  log(1, `Status ${res.status} on BMW API call ${endpoint.split('?')[0]}`);
+  if (res.status === 200 && res.data) {
+    log(2, key + ': ' + JSON.stringify(res.data));
+    self.cache[vin][key] = {fetchedAt: Date.now(), data: res.data};
+  } else {
+    log(0, `${key} not available: ${res.status} ${JSON.stringify(res.body || res.error || '')}`);
+    // don't retry before the next interval, to protect the daily API quota
+    self.cache[vin][key] = {fetchedAt: Date.now(), data: c ? c.data : null};
+  }
+  saveCache(self);
+  return self.cache[vin][key].data;
+}
+
+function lastChargingSession(history) {
+  const list = (history && history.data) || [];
+  let best = null;
+  list.forEach(function (sess) {
+    if (!best || (tsMs(sess.endTime) || 0) > (tsMs(best.endTime) || 0)) best = sess;
+  });
+  if (!best) return null;
+  const durMin = best.totalChargingDurationSec ? best.totalChargingDurationSec / 60 : null;
+  let peakKw = null;
+  (best.chargingBlocks || []).forEach(function (b) {
+    if (b.averagePowerGridKw !== undefined && b.averagePowerGridKw !== null && (peakKw === null || b.averagePowerGridKw > peakKw)) peakKw = b.averagePowerGridKw;
+  });
+  const energy = (best.energyConsumedFromPowerGridKwh !== undefined && best.energyConsumedFromPowerGridKwh !== null) ? best.energyConsumedFromPowerGridKwh : null;
+  const loc = best.chargingLocation || {};
+  return {
+    endTime: tsMs(best.endTime),
+    startSoc: best.displayedStartSoc !== undefined ? best.displayedStartSoc : null,
+    endSoc: best.displayedSoc !== undefined ? best.displayedSoc : null,
+    energyKwh: round(energy, 1),
+    durationMin: durMin !== null ? Math.round(durMin) : null,
+    avgKw: (energy && durMin) ? round(energy / (durMin / 60), 1) : null,
+    peakKw: round(peakKw, 1),
+    location: loc.municipality || loc.formattedAddress || null,
+    isPublic: !!best.publicChargingPoint
+  };
+}
+
+function tyreDiagnosisSummary(diag) {
+  const mounted = diag && diag.passengerCar && diag.passengerCar.mountedTyres;
+  if (!mounted) return null;
+  const out = {overall: mounted.aggregatedQualityStatus ? (mounted.aggregatedQualityStatus.qualityStatus || mounted.aggregatedQualityStatus.value || null) : null, wheels: {}};
+  Object.keys(WHEELS).forEach(function (w) {
+    const d = mounted[w];
+    if (!d) return;
+    out.wheels[w] = {
+      wearColor: d.tyreWear ? d.tyreWear.statusColor || null : null,
+      dueMileage: d.tyreWear ? (d.tyreWear.dueMileage !== undefined ? d.tyreWear.dueMileage : null) : null,
+      defectColor: d.tyreDefect ? d.tyreDefect.statusColor || null : null,
+      season: d.season ? d.season.value || null : null
+    };
+  });
+  return out;
+}
+
+async function buildExtended(self, vin, t, info) {
+  const cfg = self.config[vin] || {};
+  const ext = {};
+  self.cache[vin] = self.cache[vin] || {};
+
+  // energy / battery
+  ext.avgConsumption = num(t, "vehicle.drivetrain.avgElectricRangeConsumption");
+  ext.avgConsumptionUnit = entry(t, "vehicle.drivetrain.avgElectricRangeConsumption").unit || null;
+  ext.maxEnergy = round(num(t, "vehicle.drivetrain.batteryManagement.maxEnergy"), 1);
+  ext.stateOfHealth = num(t, "vehicle.powertrain.electric.battery.stateOfHealth.displayed");
+  ext.batteryPreconditioning = val(t, "vehicle.powertrain.electric.battery.preconditioning.state");
+
+  // charging now
+  let power = num(t, "vehicle.powertrain.electric.battery.charging.power");
+  if (power !== null && Math.abs(power) > 500) power = power / 1000; // catalogue unit is W
+  ext.chargingPowerKw = round(power, 1);
+  ext.chargingTarget = info.chargingTarget;
+  ext.chargingMethod = val(t, "vehicle.drivetrain.electricEngine.charging.method");
+  const dc = String(val(t, "vehicle.body.chargingPort.dcStatus") || '').toUpperCase();
+  ext.chargingType = (dc.indexOf('CONNECTED') !== -1 && dc.indexOf('DISCONNECTED') === -1) ? 'DC' : (info.connectorStatus ? 'AC' : null);
+  ext.acVoltage = num(t, "vehicle.drivetrain.electricEngine.charging.acVoltage");
+  ext.acAmpere = num(t, "vehicle.drivetrain.electricEngine.charging.acAmpere");
+  let remainingKey = "vehicle.drivetrain.electricEngine.charging.timeRemaining";
+  let remaining = num(t, remainingKey);
+  if (!remaining) {
+    remainingKey = "vehicle.drivetrain.electricEngine.charging.timeToFullyCharged";
+    remaining = num(t, remainingKey);
+  }
+  ext.chargingTimeRemaining = remaining;
+  ext.chargingEta = (info.charging && remaining) ? (tsMs(entry(t, remainingKey).timestamp) || Date.now()) + remaining * 60000 : null;
+
+  // last trip
+  const tripEndOdo = num(t, "vehicle.trip.segment.end.travelledDistance");
+  const tripEndTime = tsMs(val(t, "vehicle.trip.segment.end.time")) || tsMs(entry(t, "vehicle.trip.segment.end.drivetrain.batteryManagement.hvSoc").timestamp);
+  const trip = self.cache[vin].trip || {};
+  if (tripEndOdo !== null && tripEndOdo !== trip.endOdo) {
+    // a new trip was logged since the last poll: distance = difference of end mileages
+    trip.distance = (trip.endOdo !== undefined && trip.endOdo !== null && tripEndOdo > trip.endOdo) ? round(tripEndOdo - trip.endOdo, 1) : null;
+    trip.endOdo = tripEndOdo;
+    self.cache[vin].trip = trip;
+    saveCache(self);
+  }
+  ext.trip = {
+    endTime: tripEndTime,
+    distance: trip.distance !== undefined ? trip.distance : null,
+    endSoc: num(t, "vehicle.trip.segment.end.drivetrain.batteryManagement.hvSoc"),
+    recuperation: round(num(t, "vehicle.trip.segment.accumulated.drivetrain.electricEngine.recuperationTotal"), 1),
+    comfortEnergy: round(num(t, "vehicle.trip.segment.accumulated.drivetrain.electricEngine.energyConsumptionComfort"), 1),
+    ecoPro: round(num(t, "vehicle.trip.segment.accumulated.drivetrain.transmission.setting.fractionDriveEcoPro"), 0),
+    accelStars: round(num(t, "vehicle.trip.segment.accumulated.acceleration.starsAverage"), 1),
+    brakeStars: round(num(t, "vehicle.trip.segment.accumulated.chassis.brake.starsAverage"), 1)
+  };
+
+  // tyres (pressures in kPa -> bar)
+  const toBar = function (key) {
+    const v = num(t, key);
+    if (v === null) return null;
+    const unit = String(entry(t, key).unit || '').toLowerCase();
+    return round(unit === 'bar' || v < 20 ? v : v / 100, 1);
+  };
+  ext.tyres = {};
+  Object.keys(WHEELS).forEach(function (w) {
+    const base = "vehicle.chassis.axle." + WHEELS[w] + ".tire.";
+    ext.tyres[w] = {pressure: toBar(base + "pressure"), target: toBar(base + "pressureTarget"), temperature: num(t, base + "temperature")};
+  });
+
+  // dedicated endpoints, rate-limited
+  if (cfg.showLastCharge !== false) {
+    const to = new Date();
+    const from = new Date(to.getTime() - (cfg.chargingHistoryDays || 30) * 86400000);
+    const hist = await cachedEndpoint(self, vin, 'chargingHistory', cfg.chargingHistoryRefresh || 360,
+      '/chargingHistory?from=' + encodeURIComponent(from.toISOString()) + '&to=' + encodeURIComponent(to.toISOString()));
+    ext.lastCharge = lastChargingSession(hist);
+  }
+  if (cfg.showTyres !== false) {
+    const diag = await cachedEndpoint(self, vin, 'tyreDiagnosis', cfg.tyreDiagnosisRefresh || 720, '/smartMaintenanceTyreDiagnosis');
+    ext.tyreDiagnosis = tyreDiagnosisSummary(diag);
+  }
+  return ext;
+}
 
 function val(t, key) {
   if (!t || !t[key] || t[key].value === undefined || t[key].value === null || t[key].value === '')
@@ -348,6 +580,7 @@ async function createContainer(self, vin) {
   log(1, `Status ${res.status} on BMW API call to create container`);
   if ((res.status === 201 || res.status === 200) && res.data && res.data.containerId) {
     self.sessionInfo[vin].container_id = res.data.containerId;
+    self.sessionInfo[vin].container_name = containerName;
     containerAttached[vin] = true;
     saveSession(self);
     return {data: res.data};
@@ -356,14 +589,20 @@ async function createContainer(self, vin) {
 }
 
 async function attachContainer(self, vin, forceDelete) {
-  if (containerAttached[vin] && !forceDelete)
+  if (containerAttached[vin] && !forceDelete && self.sessionInfo[vin].container_name === containerName)
     return {data: self.sessionInfo[vin].container_id};
   let res = await listContainers(self, vin);
   if (!res || !res.data)
     return {error: 'listContainers() failed'};
   const containers = res.data.containers || [];
   for (var i = 0; i < containers.length; i++) {
-    if ((containers[i].name === containerName) && (containers[i].state !== 'DELETED')) {
+    const cname = containers[i].name || '';
+    if (cname.indexOf(containerPrefix) === 0 && cname !== containerName && containers[i].state !== 'DELETED') {
+      log(0, `deleting outdated container ${cname} (descriptor list changed)`);
+      await bmwApiCall(self, vin, bmwApiRoutes.deleteContainer, '/' + containers[i].containerId);
+      continue;
+    }
+    if ((cname === containerName) && (containers[i].state !== 'DELETED')) {
       if (forceDelete) {
         log(1, 'existing container found, deleting before re-creating');
         self.sessionInfo[vin].container_id = containers[i].containerId;
@@ -371,6 +610,7 @@ async function attachContainer(self, vin, forceDelete) {
       } else {
         log(1, 'existing container found, will use it');
         self.sessionInfo[vin].container_id = containers[i].containerId;
+        self.sessionInfo[vin].container_name = containerName;
         containerAttached[vin] = true;
         saveSession(self);
         return {data: self.sessionInfo[vin].container_id};
@@ -394,7 +634,7 @@ async function getTelematicData(self, vin) {
   const token = await getAccessToken(self, vin);
   if (!token || !token.data)
     return;
-  if (!containerAttached[vin] || !self.sessionInfo[vin].container_id) {
+  if (!containerAttached[vin] || !self.sessionInfo[vin].container_id || self.sessionInfo[vin].container_name !== containerName) {
     const c = await attachContainer(self, vin);
     if (!c || !c.data) return;
   }

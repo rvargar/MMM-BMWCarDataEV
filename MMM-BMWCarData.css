@@ -49,3 +49,67 @@
 .MMM-BMWCarData .bmw-container.spacer {
   height: 50px;
 }
+
+/* ---------- extended EV telemetry panel ---------- */
+.MMM-BMWCarData .bmw-ext {
+  margin-top: 8px;
+  padding-top: 6px;
+  border-top: 1px solid #444;
+  font-size: 16px;
+  line-height: 1.35;
+}
+
+.MMM-BMWCarData .bmw-ext-row {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  margin-bottom: 4px;
+}
+
+.MMM-BMWCarData .bmw-ext-left,
+.MMM-BMWCarData .bmw-ext-right {
+  white-space: nowrap;
+}
+
+.MMM-BMWCarData .bmw-ext-right {
+  margin-left: auto;
+}
+
+.MMM-BMWCarData .bmw-ext-sub {
+  flex-basis: 100%;
+  font-size: 13px;
+  line-height: 1.25;
+  padding-left: 30px;
+}
+
+.MMM-BMWCarData .bmw-tyres {
+  display: flex;
+  align-items: center;
+  margin-top: 2px;
+}
+
+.MMM-BMWCarData .bmw-tyres-icon {
+  width: 30px;
+  flex: none;
+}
+
+.MMM-BMWCarData .bmw-tyres-grid {
+  display: flex;
+  flex-wrap: wrap;
+  flex: 1;
+}
+
+.MMM-BMWCarData .bmw-tyre {
+  width: 50%;
+  white-space: nowrap;
+}
+
+.MMM-BMWCarData .bmw-ext .bmw-tyre-dot {
+  width: 14px;
+  font-size: 8px;
+  vertical-align: middle;
+}
+
+.MMM-BMWCarData .bmw-tyre-temp {
+  font-size: 12px;
+}
