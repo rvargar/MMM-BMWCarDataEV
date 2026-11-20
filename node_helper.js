@@ -325,9 +325,21 @@ async function buildExtended(self, vin, t, info) {
   self.cache[vin] = self.cache[vin] || {};
 
   // energy / battery
-  ext.avgConsumption = num(t, "vehicle.drivetrain.avgElectricRangeConsumption");
-  ext.avgConsumptionUnit = entry(t, "vehicle.drivetrain.avgElectricRangeConsumption").unit || null;
   ext.maxEnergy = round(num(t, "vehicle.drivetrain.batteryManagement.maxEnergy"), 1);
+  // BMW sends 999.99976 (no unit) as "not available" on some models (e.g. iX3 Neue Klasse); accept only plausible values
+  const bmwAvg = numInRange(t, "vehicle.drivetrain.avgElectricRangeConsumption", 0.1, 100);
+  const calc = updateConsumption(self, vin, cfg, info.mileage, info.chargingLevelHv, ext.maxEnergy);
+  if (bmwAvg !== null && cfg.consumptionSource !== 'calculated') {
+    ext.avgConsumption = round(bmwAvg, 1);
+    ext.avgConsumptionUnit = entry(t, "vehicle.drivetrain.avgElectricRangeConsumption").unit || null;
+    ext.avgConsumptionCalculated = false;
+  } else {
+    ext.avgConsumption = calc.value;
+    ext.avgConsumptionUnit = 'kWh/100km';
+    ext.avgConsumptionCalculated = true;
+    ext.consumptionKmTracked = calc.km;
+    ext.consumptionKmNeeded = calc.value === null ? Math.max(0, Math.ceil((cfg.consumptionMinKm || 20) - calc.km)) : 0;
+  }
   ext.stateOfHealth = num(t, "vehicle.powertrain.electric.battery.stateOfHealth.displayed");
   ext.batteryPreconditioning = val(t, "vehicle.powertrain.electric.battery.preconditioning.state");
 
@@ -365,8 +377,8 @@ async function buildExtended(self, vin, t, info) {
     endTime: tripEndTime,
     distance: trip.distance !== undefined ? trip.distance : null,
     endSoc: num(t, "vehicle.trip.segment.end.drivetrain.batteryManagement.hvSoc"),
-    recuperation: round(num(t, "vehicle.trip.segment.accumulated.drivetrain.electricEngine.recuperationTotal"), 1),
-    comfortEnergy: round(num(t, "vehicle.trip.segment.accumulated.drivetrain.electricEngine.energyConsumptionComfort"), 1),
+    recuperation: round(numInRange(t, "vehicle.trip.segment.accumulated.drivetrain.electricEngine.recuperationTotal", 0, 100), 1),
+    comfortEnergy: round(numInRange(t, "vehicle.trip.segment.accumulated.drivetrain.electricEngine.energyConsumptionComfort", 0, 100), 1),
     ecoPro: round(num(t, "vehicle.trip.segment.accumulated.drivetrain.transmission.setting.fractionDriveEcoPro"), 0),
     accelStars: round(num(t, "vehicle.trip.segment.accumulated.acceleration.starsAverage"), 1),
     brakeStars: round(num(t, "vehicle.trip.segment.accumulated.chassis.brake.starsAverage"), 1)
@@ -411,6 +423,46 @@ function num(t, key) {
   if (v === null) return null;
   const n = Number(v);
   return isNaN(n) ? null : n;
+}
+
+function numInRange(t, key, min, max) {
+  const n = num(t, key);
+  return (n === null || n < min || n > max) ? null : n;
+}
+
+// Rolling average consumption computed from SoC drop x usable capacity over driven km.
+// Only intervals where the car moved count (parked drain is ignored); a SoC increase (charging) resets the baseline.
+// Segments telescope, so the 1 % SoC resolution averages out over the window.
+function updateConsumption(self, vin, cfg, odo, soc, maxEnergy) {
+  self.cache[vin] = self.cache[vin] || {};
+  const c = self.cache[vin].consumption || {segments: []};
+  const windowKm = cfg.consumptionWindowKm || 300;
+  const minKm = cfg.consumptionMinKm || 20;
+  if (odo !== null && soc !== null && maxEnergy) {
+    if (c.baseOdo === undefined || c.baseSoc === undefined || odo < c.baseOdo) {
+      c.baseOdo = odo; c.baseSoc = soc;
+    } else if (soc > c.baseSoc) {
+      c.baseOdo = odo; c.baseSoc = soc;           // charged in between: start a new baseline
+    } else if (odo > c.baseOdo) {
+      c.segments.push({km: odo - c.baseOdo, kwh: (c.baseSoc - soc) / 100 * maxEnergy, at: Date.now()});
+      c.baseOdo = odo; c.baseSoc = soc;
+    } else if (soc < c.baseSoc) {
+      c.baseSoc = soc;                            // drain while parked: not counted
+    }
+    // keep only the most recent `windowKm` kilometres
+    let km = 0;
+    for (var i = c.segments.length - 1; i >= 0; i--) {
+      km += c.segments[i].km;
+      if (km > windowKm) { c.segments = c.segments.slice(i); break; }
+    }
+    self.cache[vin].consumption = c;
+    saveCache(self);
+  }
+  const totKm = c.segments.reduce(function (a, x) { return a + x.km; }, 0);
+  const totKwh = c.segments.reduce(function (a, x) { return a + x.kwh; }, 0);
+  let value = (totKm >= minKm) ? round(totKwh / totKm * 100, 1) : null;
+  if (value !== null && (value <= 0 || value > 100)) value = null;
+  return {value: value, km: round(totKm, 1)};
 }
 
 function firstNum(t, keys) {
