@@ -112,6 +112,14 @@ The module has a few configuration options:
       <td>Show average energy consumption, battery state of health and usable battery capacity.<br /><br /><strong>Default: </strong><code>true</code></td>
     </tr>
     <tr>
+      <td><code>consumptionSource</code></td>
+      <td><code>"auto"</code>: use BMW&#39;s average consumption when it is valid, otherwise calculate it. <code>"calculated"</code>: always calculate. Some models (e.g. iX3 Neue Klasse) send the placeholder <code>999.99976</code> instead of a value.<br /><br /><strong>Default: </strong><code>"auto"</code></td>
+    </tr>
+    <tr>
+      <td><code>consumptionWindowKm / consumptionMinKm</code></td>
+      <td>Calculated average = SoC drop &times; usable battery capacity / km driven, over the last <code>consumptionWindowKm</code> km; shown once <code>consumptionMinKm</code> km are collected. Charging and parked battery drain are excluded. Marked "calc." on the mirror.<br /><br /><strong>Default: </strong><code>300 / 20</code></td>
+    </tr>
+    <tr>
       <td><code>showCharging</code></td>
       <td>While plugged in: charging power (kW), AC/DC, current → target SoC, estimated end time (ETA), remaining time, AC voltage/current.<br /><br /><strong>Default: </strong><code>true</code></td>
     </tr>
@@ -161,6 +169,7 @@ Not available via the CarData API: battery temperature, and an explicit charging
 
 ## Changelog
 
+**2026-11-20** Fix average consumption showing 999.99 kWh/100km: BMW's "not available" placeholder is now ignored and the average is calculated from SoC and mileage instead.<br />
 **2026-11-18** Extended EV telemetry panel: average consumption, battery health/capacity, live charging (kW, AC/DC, target, ETA), last charging session (charging history endpoint), last trip, tyre pressures/temperatures and tyre wear (tyre diagnosis endpoint). Automatic container migration and on-disk cache for rate-limited endpoints.<br />
 **2026-11-17** EV support (tested target: BMW iX3 Neue Klasse): battery SoC, charging/plug status and EV descriptors; per-login PKCE; null-safe parsing; compatibility with older MagicMirror (2.9.x / Node 10, falls back to node-fetch and console logging). For electric cars set <code>showFuelRange: false</code>. Login now requests only <code>cardata:api:read</code> by default (optional <code>scope</code> config to override), so a client ID without "CarData Stream" enabled works.<br />
 **2024-12-24** Pushed first version which fully works for my car.<br />

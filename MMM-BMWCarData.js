@@ -14,6 +14,9 @@ Module.register("MMM-BMWCarData", {
     lastUpdatedText: "last updated",
     // extended EV telemetry panel (below "last updated")
     showConsumption: true,      // average consumption, battery health, usable capacity
+    consumptionSource: "auto",  // "auto": BMW value if valid, else calculated; "calculated": always calculate
+    consumptionWindowKm: 300,   // calculated average covers the last N km
+    consumptionMinKm: 20,       // show calculated average after this many km
     showCharging: true,         // live charging power, type, target, ETA (only while plugged in)
     showLastCharge: true,       // last session from BMW charging history
     showTrip: true,             // last trip info
@@ -310,8 +313,11 @@ Module.register("MMM-BMWCarData", {
     // energy / battery
     if (c.showConsumption && (has(e.avgConsumption) || has(e.stateOfHealth) || has(e.maxEnergy))) {
       var unit = e.avgConsumptionUnit && e.avgConsumptionUnit.indexOf('mi') !== -1 ? ' mi/kWh' : ' kWh/100km';
+      var consText = has(e.avgConsumption)
+        ? '\u2300 ' + e.avgConsumption + unit + (e.avgConsumptionCalculated ? ' calc.' : '')
+        : (e.avgConsumptionCalculated && has(e.consumptionKmTracked) ? '\u2300 after ' + e.consumptionKmNeeded + ' km' : '\u00a0');
       box.appendChild(this.extRow("fa-tachometer-alt",
-        has(e.avgConsumption) ? '\u2300 ' + e.avgConsumption + unit : '\u00a0',
+        consText,
         has(e.stateOfHealth) ? 'SoH ' + e.stateOfHealth + ' %' : null,
         has(e.maxEnergy) ? 'usable battery ' + e.maxEnergy + ' kWh' : null));
     }
